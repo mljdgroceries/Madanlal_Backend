@@ -1,0 +1,81 @@
+# stages:
+#   - deploy
+
+# deploy-job:
+#   stage: deploy
+#   before_script:
+#     - mkdir -p ~/.ssh
+#     - echo "$AWS_SECRET_KEY" > ~/.ssh/id_rsa
+#     - chmod 600 ~/.ssh/id_rsa
+
+#   script:
+#     - echo "🚀 Starting Grocery Deployment..."
+#     - echo "🔑 Checking GitLab Access Token..."
+#     - |
+#       if [ -z "$GITLAB_ACCESS_TOKEN" ]; then
+#         echo "❌ GitLab Access Token is not set"
+#         exit 1
+#       else
+#         echo "✅ GitLab Access Token is configured"
+#       fi
+#     - |
+#       ssh -o StrictHostKeyChecking=no $AWS_USERNAME@$AWS_PUBLIC_IP "
+        
+#         if [ -d '/var/www/api/madanlal_grocery_backend' ]; then
+#           mv /var/www/api/madanlal_grocery_backend /var/www/api/madanlal_grocery_backend_backup_\$(date +%Y%m%d_%H%M%S)
+#         fi
+        
+#         echo 'Fresh clone with token...'
+#         cd /var/www/api/
+#         git clone https://oauth2:$GITLAB_ACCESS_TOKEN@gitlab.com/Sudhanshu_004/madanlal_grocery_backend.git
+        
+#         cd madanlal_grocery_backend
+        
+#         echo 'Running deployment script...'
+#         bash deploy.sh
+#       "
+
+#   only:
+#     - main
+stages:
+  - deploy
+
+deploy-job:
+  stage: deploy
+  before_script:
+    - mkdir -p ~/.ssh
+    - echo "$AWS_SECRET_KEY" > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+
+  script:
+    - echo "🚀 Starting Grocery Deployment..."
+    - echo "🔑 Checking GitLab Access Token..."
+    - |
+      if [ -z "$GITLAB_ACCESS_TOKEN" ]; then
+        echo "❌ GitLab Access Token is not set"
+        exit 1
+      else
+        echo "✅ GitLab Access Token is configured"
+      fi
+    - |
+      ssh -o StrictHostKeyChecking=no $AWS_USERNAME@$AWS_PUBLIC_IP "
+        cd /var/www/api/madanlal_grocery_backend || { echo '❌ Directory not found'; exit 1; }
+        
+        echo '📥 Configuring Git Remote...'
+        git remote set-url origin https://oauth2:$GITLAB_ACCESS_TOKEN@gitlab.com/Sudhanshu_004/madanlal_grocery_backend.git
+        
+        echo '📥 Fetching latest code...'
+        git fetch origin main || { echo '❌ Git fetch failed! Please check your GITLAB_ACCESS_TOKEN'; exit 1; }
+        
+        echo '📥 Resetting to origin/main...'
+        git reset --hard origin/main || { echo '❌ Git reset failed!'; exit 1; }
+        
+        echo '🕒 Last Modified Files:'
+        ls -l src/controllers/user/userController.js
+        
+        echo '🚀 Running deployment script...'
+        bash deploy.sh || { echo '❌ deploy.sh failed'; exit 1; }
+      "
+
+  only:
+    - main
