@@ -5,6 +5,16 @@ const { responseHandler } = require("../../utils/responseHandler");
 const statusCode = require("../../utils/httpResponseCode");
 const getPagination = require("../../utils/getPagination");
 const mongoose = require("mongoose");
+const { redisConnection } = require("../../config/redis");
+
+const invalidateHomeCache = async () => {
+  if (redisConnection.status !== "ready") return;
+  try {
+    await redisConnection.del("home:shared:v2");
+  } catch (error) {
+    console.error("Home cache invalidation failed:", error.message);
+  }
+};
 
 exports.createHomeHeading = catchAsyncError(async (req, res) => {
     const { heading, productIds } = req.body;
@@ -52,6 +62,7 @@ exports.createHomeHeading = catchAsyncError(async (req, res) => {
     heading,
     productIds: uniqueProductIds,
   });
+    await invalidateHomeCache();
     return responseHandler({
         res,
         code: statusCode.SUCCESS,
@@ -191,12 +202,14 @@ exports.getHomeHeadingById = catchAsyncError(async (req, res) => {
 });
 exports.updateHomeHeading = catchAsyncError(async (req, res) => {
     const { homeHeadingId } = req.query;
-    const { heading, productIds } = req.body;
-    if (!homeHeadingId || !heading || !productIds || !Array.isArray(productIds)) {
+    const { heading, productIds, status } = req.body;
+    if (!homeHeadingId || (!heading && !productIds && !status) ||
+        (productIds !== undefined && !Array.isArray(productIds)) ||
+        (status !== undefined && !["Active", "Inactive"].includes(status))) {
         return responseHandler({
             res,
             code: statusCode.DATAMISSING,
-            message: "Home heading ID, heading and productIds are required"
+            message: "Provide a valid heading, productIds, or status"
         });
     }
     // const homeHeading = await HomeHeading.findByIdAndUpdate(homeHeadingId, { heading, productIds }, { new: true });
@@ -210,11 +223,11 @@ exports.updateHomeHeading = catchAsyncError(async (req, res) => {
   }
 
   // 🔴 Validate productIds
-  const validObjectIds = productIds.filter((id) =>
+  const validObjectIds = (productIds || []).filter((id) =>
     mongoose.Types.ObjectId.isValid(id)
   );
 
-  if (validObjectIds.length !== productIds.length) {
+  if (validObjectIds.length !== (productIds || []).length) {
     return responseHandler({
       res,
       code: statusCode.BADREQUEST,
@@ -223,12 +236,12 @@ exports.updateHomeHeading = catchAsyncError(async (req, res) => {
   }
 
   // 🟢 Check products exist & NOT deleted
-  const validProducts = await Product.find({
+  const validProducts = productIds === undefined ? [] : await Product.find({
     _id: { $in: productIds },
     isDeleted: { $ne: true }, // ✅ IMPORTANT
   }).select("_id");
 
-  if (validProducts.length !== productIds.length) {
+  if (productIds !== undefined && validProducts.length !== productIds.length) {
     return responseHandler({
       res,
       code: statusCode.BADREQUEST,
@@ -237,7 +250,7 @@ exports.updateHomeHeading = catchAsyncError(async (req, res) => {
   }
 
   // 🟢 Remove duplicates
-  const uniqueProductIds = [...new Set(productIds)];
+  const uniqueProductIds = productIds === undefined ? undefined : [...new Set(productIds)];
 
   // 🔴 Check heading exists
   const existingHeading = await HomeHeading.findById(homeHeadingId);
@@ -252,14 +265,14 @@ exports.updateHomeHeading = catchAsyncError(async (req, res) => {
   // 🟢 Update
   const homeHeading = await HomeHeading.findByIdAndUpdate(
     homeHeadingId,
-    {
-      $set: {
-        heading,
-        productIds: uniqueProductIds,
-      },
-    },
+    { $set: {
+        ...(heading !== undefined ? { heading } : {}),
+        ...(uniqueProductIds !== undefined ? { productIds: uniqueProductIds } : {}),
+        ...(status !== undefined ? { status } : {}),
+      } },
     { new: true }
   );
+    await invalidateHomeCache();
     return responseHandler({
         res,
         code: statusCode.SUCCESS,
@@ -277,6 +290,7 @@ exports.deleteHomeHeading = catchAsyncError(async (req, res) => {
         });
     }
     const homeHeading = await HomeHeading.findByIdAndDelete(homeHeadingId);
+    await invalidateHomeCache();
     return responseHandler({
         res,
         code: statusCode.SUCCESS,

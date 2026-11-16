@@ -8,7 +8,7 @@ const buildStockStatus = (qty, minStock = 0) => {
 };
 
 /**
- * Pull live stock from Petpooja for one variation and update admin DB when Petpooja is lower or different.
+ * Pull live stock from Petpooja for one variation and keep admin DB in sync.
  */
 const syncVariationStockFromPetpooja = async (product, variation) => {
   if (!variation?.petpoojaItemId) {
@@ -22,15 +22,14 @@ const syncVariationStockFromPetpooja = async (product, variation) => {
 
   const liveQty = Number(petpoojaQty);
   const localQty = Number(variation.stockQuantity || 0);
-  // Checkout may lower local stock from Petpooja, but must never increase it.
-  // Increasing here can overwrite stock already reserved by another concurrent order.
-  if (liveQty < localQty) {
+  // Petpooja is the source of truth for live inventory at checkout.
+  if (liveQty !== localQty) {
     variation.stockQuantity = liveQty;
     variation.stockStatus = buildStockStatus(liveQty, Number(variation.minStock || 0));
     await product.save();
   }
 
-  return Math.min(liveQty, localQty);
+  return liveQty;
 };
 
 /**

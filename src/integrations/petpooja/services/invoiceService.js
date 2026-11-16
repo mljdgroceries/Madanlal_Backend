@@ -45,6 +45,7 @@ class InvoiceService extends BaseService {
 
   // Build payload for invoice creation based on original sales order
   async _buildInvoicePayload(salesOrderId, order, user, templateId, customChargeId, voucherAutoSeriesId, targetStatus = 'sent') {
+    await require('./partyService').resolveOrderShippingAddress(user, order);
     const Product = require('../../../models/productModel');
     const itemService = require('./itemService');
 
@@ -167,7 +168,10 @@ class InvoiceService extends BaseService {
       isInclusiveTax: true,
       isItemLevelDiscount: false,
       lineItems,
-      notes: '',
+      // Keep the order's landmark even when Petpooja reuses an older party address.
+      notes: order.deliveryAddress?.landmark?.trim()
+        ? `Landmark: ${order.deliveryAddress.landmark.trim()}`
+        : '',
       partyId: Number(user.petpoojaCustomerId),
       referenceNumber: order.orderId || '',
       placeOfSupplyId: 9,
@@ -190,6 +194,7 @@ class InvoiceService extends BaseService {
    * Builds invoice payload using deliveredItemsDetails.
    */
   async _buildDeliveredInvoicePayload(salesOrderId, order, user, templateId, customChargeId, voucherAutoSeriesId) {
+    await require('./partyService').resolveOrderShippingAddress(user, order);
     const lineItems = [];
     let totalTaxAcc = 0;
     let totalTaxableAcc = 0;
@@ -279,7 +284,10 @@ class InvoiceService extends BaseService {
       isInclusiveTax: true,
       isItemLevelDiscount: false,
       lineItems,
-      notes: '',
+      // Use the same delivery landmark on invoices for delivered items.
+      notes: order.deliveryAddress?.landmark?.trim()
+        ? `Landmark: ${order.deliveryAddress.landmark.trim()}`
+        : '',
       partyId: Number(user.petpoojaCustomerId),
       referenceNumber: order.orderId || '',
       placeOfSupplyId: 9,

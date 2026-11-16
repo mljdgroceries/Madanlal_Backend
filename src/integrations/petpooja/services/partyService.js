@@ -18,8 +18,8 @@ class PartyService extends BaseService {
       partyType: 'customer',
       isActive: user.status === 'Active',
       addresses: (user.addresses || []).map(addr => ({
-        type: addr.isDefault ? 'billing' : 'shipping',
-        street: `${addr.houseFlatOfficeNo || ''} ${addr.area_building || ''} ${addr.landmark || ''}`.trim() || 'No Street Provided',
+        type: addr === defaultAddress ? 'billing' : 'shipping',
+        street: `${addr.houseFlatOfficeNo || ''} ${addr.area_building || ''} ${addr.location?.landmark || addr.landmark || ''}`.trim() || 'No Street Provided',
         city: addr.location?.address || 'Agra',
         stateId: 9, // Hardcoded to Uttar Pradesh (9) to force intra-state GST (CGST/SGST)
         state: 'Uttar Pradesh',
@@ -129,6 +129,72 @@ class PartyService extends BaseService {
       // Fallback: use billing address for shipping if no shipping address exists
       shippingAddressId: shipping?.id ? String(shipping.id) : (billing?.id ? String(billing.id) : null),
     };
+  }
+
+  // Resolve from the order snapshot, never from the first/default user address.
+  async resolveOrderShippingAddress(user, order) {
+    const delivery = order.deliveryAddress;
+    if (!delivery || !delivery.address) {
+      throw new Error('Order delivery address is missing; cannot select Petpooja shipping address');
+    }
+    const expected = {
+      type: 'shipping',
+      street: [delivery.houseFlatOfficeNo, delivery.area_building, delivery.landmark]
+        .filter(Boolean).join(' ').trim() || 'No Street Provided',
+      city: delivery.address,
+      stateId: 9,
+      state: 'Uttar Pradesh',
+      country: 'India',
+      pincode: delivery.pincode || ''
+    };
+    const normalize = value => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    const sameAddress = (address, target) => address.id &&
+      ['street', 'city', 'pincode'].every(key => normalize(address[key]) === normalize(target[key]));
+    const matches = address => sameAddress(address, expected);
+    const expectedBilling = {
+      ...expected,
+      type: 'billing',
+    };
+    const customerId = user.petpoojaCustomerId;
+    if (!customerId) throw new Error('Petpooja customer ID is missing');
+    let party = await this.getParty(customerId);
+    let shipping = (party.addresses || []).find(matches);
+    let billing = expectedBilling
+      ? (party.addresses || []).find(address => address.type === 'billing' && sameAddress(address, expectedBilling))
+      : (party.addresses || []).find(address => address.type === 'billing');
+    if (!shipping || (expectedBilling && !billing)) {
+      // Keep old snapshots while using the order delivery address for billing too.
+      const addresses = (party.addresses || []).map(address => ({ ...address }));
+      if (expectedBilling && !billing) {
+        addresses.forEach(address => {
+          if (address.type === 'billing') address.type = 'shipping';
+        });
+        const existingBilling = addresses.find(address => sameAddress(address, expectedBilling));
+        if (existingBilling) existingBilling.type = 'billing';
+        else addresses.push(expectedBilling);
+      }
+      if (!shipping && !addresses.some(address =>
+        ['street', 'city', 'pincode'].every(key => normalize(address[key]) === normalize(expected[key])))) {
+        addresses.push(expected);
+      }
+      await this.put(`/${customerId}`, {
+        ...this.buildCustomerPayload(user),
+        addresses
+      });
+      party = await this.getParty(customerId);
+      shipping = (party.addresses || []).find(matches);
+      billing = expectedBilling
+        ? (party.addresses || []).find(address => address.type === 'billing' && sameAddress(address, expectedBilling))
+        : (party.addresses || []).find(address => address.type === 'billing');
+    }
+    if (expectedBilling && !billing) {
+      throw new Error('Petpooja did not return the order billing address');
+    }
+    if (!shipping) throw new Error('Petpooja did not return the order shipping address');
+    order.shippingPetpoojaAddressId = String(shipping.id);
+    // An address update can refresh IDs, so resolve billing from the latest party too.
+    order.billingPetpoojaAddressId = billing?.id ? String(billing.id) : String(shipping.id);
+    return String(shipping.id);
   }
 
   /**

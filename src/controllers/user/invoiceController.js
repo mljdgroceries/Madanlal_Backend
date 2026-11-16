@@ -256,7 +256,7 @@ const renderInvoicePdf = ({ order, user, items, totals, warehouseAddress, wareho
     const companyEmail = warehouseEmail || process.env.INVOICE_COMPANY_EMAIL || "N/A";
     const buyerName = order.deliveryAddress?.fullName || user?.fullName || "N/A";
     const buyerPhone = order.deliveryAddress?.phoneNumber || user?.phone || "N/A";
-    const buyerAddress = order.deliveryAddress?.address || "N/A";
+    const buyerAddress = [order.deliveryAddress?.houseFlatOfficeNo, order.deliveryAddress?.area_building, order.deliveryAddress?.address, order.deliveryAddress?.landmark].filter(Boolean).join(", ") || "N/A";
     const buyerPincode = order.deliveryAddress?.pincode || "";
     const stateText = "UTTAR PRADESH (Code: 09)";
 

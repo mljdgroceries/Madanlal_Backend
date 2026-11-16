@@ -107,9 +107,12 @@ class CreditNoteService extends BaseService {
 
         // Assuming ret has productId (ObjectId), variationId, quantity, basePrice, priceWithGST, gstPercent
         const qty = Number(ret.quantity || 0);
-        const rate = Number(ret.rate || ret.priceWithGST || 0);
         const base = Number(ret.basePrice || 0);
         const gstPercent = Number(ret.gstPercent || 0);
+        let rate = Number(ret.rate || ret.priceWithGST || ret.unitPrice || ret.sellingPrice || 0);
+        if (rate <= 0 || (gstPercent > 0 && rate <= base)) {
+          rate = Number((base + (base * gstPercent) / 100).toFixed(2));
+        }
         const componentTaxIds = getPetpoojaIntraComponentTaxIds(gstPercent);
         const taxableAmountPerItem = rate / (1 + gstPercent / 100);
         const totalTaxableAmount = Number((taxableAmountPerItem * qty).toFixed(2));
@@ -146,6 +149,11 @@ class CreditNoteService extends BaseService {
         );
 
         if (totalFee > 0) {
+          const customChargeId = Number(options.customChargeId);
+          if (!Number.isFinite(customChargeId) || customChargeId <= 0) {
+            throw new Error('Missing Petpooja custom charge ID for cancellation credit note');
+          }
+
           const feeGst = 18;
           const feeTaxable = Number((totalFee / (1 + feeGst / 100)).toFixed(2));
           const feeTax = Number((totalFee - feeTaxable).toFixed(2));
@@ -153,6 +161,7 @@ class CreditNoteService extends BaseService {
           const feeSgst = Number((feeTax - feeCgst).toFixed(2));
 
           customCharges.push({
+            id: customChargeId,
             name: 'Delivery Charges',
             sac: '996511',
             amount: totalFee,

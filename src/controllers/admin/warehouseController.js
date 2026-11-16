@@ -1,11 +1,19 @@
 const Warehouse = require("../../models/warehouseModel");
+const { warehouseLocationFields } = require("../../helpers/warehouseLocationHelper");
 const { responseHandler } = require("../../utils/responseHandler");
 const statusCode = require("../../utils/httpResponseCode");
 const { catchAsyncError } = require("../../utils/generateError");
 
 // Create a new warehouse address
 exports.createWarehouse = catchAsyncError(async (req, res) => {
-  const { address, isDefault, email, phone } = req.body;
+  const { address, isDefault, email, phone, coordinates } = req.body;
+
+  let locationFields;
+  try {
+    locationFields = warehouseLocationFields(req.body);
+  } catch (error) {
+    return responseHandler({ res, code: statusCode.DATAMISSING, message: error.message });
+  }
 
   if (!address || !address.trim()) {
     return responseHandler({
@@ -25,6 +33,7 @@ exports.createWarehouse = catchAsyncError(async (req, res) => {
   const shouldBeDefault = isDefault || count === 0;
 
   const warehouse = await Warehouse.create({
+    ...locationFields,
     address: address.trim(),
     email: email ? email.trim() : undefined,
     phone: phone ? phone.trim() : undefined,
@@ -55,7 +64,14 @@ exports.getAllWarehouses = catchAsyncError(async (req, res) => {
 // Update a warehouse address
 exports.updateWarehouse = catchAsyncError(async (req, res) => {
   const { warehouseId } = req.params;
-  const { address, email, phone } = req.body;
+  const { address, email, phone, coordinates } = req.body;
+
+  let locationFields;
+  try {
+    locationFields = warehouseLocationFields(req.body);
+  } catch (error) {
+    return responseHandler({ res, code: statusCode.DATAMISSING, message: error.message });
+  }
 
   if (!warehouseId) {
     return responseHandler({
@@ -65,7 +81,8 @@ exports.updateWarehouse = catchAsyncError(async (req, res) => {
     });
   }
 
-  if (!address || !address.trim()) {
+  if ((address !== undefined && (typeof address !== "string" || !address.trim())) ||
+      (address === undefined && !Object.keys(locationFields).length && email === undefined && phone === undefined)) {
     return responseHandler({
       res,
       code: statusCode.DATAMISSING,
@@ -73,9 +90,8 @@ exports.updateWarehouse = catchAsyncError(async (req, res) => {
     });
   }
 
-  const updateFields = {
-    address: address.trim(),
-  };
+  const updateFields = { ...locationFields };
+  if (address !== undefined) updateFields.address = address.trim();
 
   if (email !== undefined) updateFields.email = email ? email.trim() : "";
   if (phone !== undefined) updateFields.phone = phone ? phone.trim() : "";
@@ -83,7 +99,7 @@ exports.updateWarehouse = catchAsyncError(async (req, res) => {
   const warehouse = await Warehouse.findOneAndUpdate(
     { _id: warehouseId, isActive: true },
     updateFields,
-    { new: true }
+    { new: true, runValidators: true }
   );
 
   if (!warehouse) {
@@ -166,15 +182,25 @@ exports.setDefaultWarehouse = catchAsyncError(async (req, res) => {
     });
   }
 
-  // Unset all defaults, then set this one
-  await Warehouse.updateMany({ isDefault: true }, { isDefault: false });
-  warehouse.isDefault = true;
-  await warehouse.save();
+  // Do not clear the selected warehouse: an already-true hydrated document
+  // does not mark assigning true again as a change after updateMany.
+  const defaultWarehouse = await Warehouse.findOneAndUpdate(
+    { _id: warehouseId, isActive: true },
+    { $set: { isDefault: true } },
+    { new: true, runValidators: true }
+  );
+  if (!defaultWarehouse) {
+    return responseHandler({ res, code: statusCode.RESULTNOTFOUND, message: "Warehouse not found." });
+  }
+  await Warehouse.updateMany(
+    { _id: { $ne: warehouseId }, isDefault: true },
+    { $set: { isDefault: false } }
+  );
 
   return responseHandler({
     res,
     code: statusCode.SUCCESS,
     message: "Default warehouse updated successfully.",
-    data: warehouse,
+    data: defaultWarehouse,
   });
 });

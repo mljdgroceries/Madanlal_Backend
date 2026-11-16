@@ -1,3 +1,4 @@
+const { getVariationPrice, refreshCartPrices, checkoutPriceReview } = require("../../helpers/cartPriceHelper");
 //models
 const User = require("../../models/userModel");
 const DRIVER = require("../../models/driverModel");
@@ -7,6 +8,7 @@ const Cart = require("../../models/cartModel");
 const Issue = require("../../models/issueModel");
 const FreeItemRule = require("../../models/freeItemRuleModel");
 const DeliveryOrderConfig = require("../../models/deliveryConfigModel");
+const { getDeliveryQuote, requireDeliveryQuote } = require("../../services/distanceDeliveryService");
 const Coupons = require("../../models/promotionsAndCouponModal");
 const CouponUsage = require("../../models/couponUsageModel");
 const Zone = require("../../models/deliveryZonesModel");
@@ -93,6 +95,9 @@ exports.sendOtp = catchAsyncError(async (req, res) => {
     });
   }
 
+  // Validate before any database changes; retain the existing lookup format.
+  msg91.withCountryCode(req.body.phone);
+
   // Generate OTP (5 digits or your preferred logic)
   // const otp = generateOtp();
   const otp = TEST_USER_NUMBERS.includes(normalizedPhone)
@@ -164,8 +169,8 @@ exports.sendOtp = catchAsyncError(async (req, res) => {
 
     // await sendOtpViaMsg91IfConfigured(normalizedPhone, otp);
     if (!TEST_USER_NUMBERS.includes(normalizedPhone)) {
-  await sendOtpViaMsg91IfConfigured(normalizedPhone, otp);
-}
+      await sendOtpViaMsg91IfConfigured(normalizedPhone, otp);
+    }
 
     return responseHandler({
       res,
@@ -208,8 +213,8 @@ exports.sendOtp = catchAsyncError(async (req, res) => {
 
   // await sendOtpViaMsg91IfConfigured(normalizedPhone, otp);
   if (!TEST_USER_NUMBERS.includes(normalizedPhone)) {
-  await sendOtpViaMsg91IfConfigured(normalizedPhone, otp);
-}
+    await sendOtpViaMsg91IfConfigured(normalizedPhone, otp);
+  }
 
   return responseHandler({
     res,
@@ -281,32 +286,32 @@ exports.Login = catchAsyncError(async (req, res) => {
     // }
     const isTestUser = TEST_USER_NUMBERS.includes(normalizedPhone);
 
-if (isTestUser) {
-  if (otp !== TEST_OTP) {
-    return responseHandler({
-      res,
-      code: statusCode.DATAMISSING,
-      message: "Invalid OTP",
-    });
-  }
-} else if (msg91.isConfigured()) {
-  try {
-    await msg91.verifyOtp(normalizedPhone, otp);
-  } catch (error) {
-    return responseHandler({
-      res,
-      code: statusCode.DATAMISSING,
-      message: "Invalid OTP",
-      error: error.response?.data?.message || error.message,
-    });
-  }
-} else if (user.otp !== otp) {
-  return responseHandler({
-    res,
-    code: statusCode.DATAMISSING,
-    message: "Invalid OTP",
-  });
-}
+    if (isTestUser) {
+      if (otp !== TEST_OTP) {
+        return responseHandler({
+          res,
+          code: statusCode.DATAMISSING,
+          message: "Invalid OTP",
+        });
+      }
+    } else if (msg91.isConfigured()) {
+      try {
+        await msg91.verifyOtp(normalizedPhone, otp);
+      } catch (error) {
+        return responseHandler({
+          res,
+          code: statusCode.DATAMISSING,
+          message: "Invalid OTP",
+          error: error.response?.data?.message || error.message,
+        });
+      }
+    } else if (user.otp !== otp) {
+      return responseHandler({
+        res,
+        code: statusCode.DATAMISSING,
+        message: "Invalid OTP",
+      });
+    }
 
     // OTP verified → clear OTP and generate token
     user.otp = null;
@@ -424,6 +429,7 @@ exports.mergeGuestCart = catchAsyncError(async (req, res) => {
 
     if (existing) {
       existing.quantity += quantity;
+      existing.price = getVariationPrice(variation);
       existing.totalPrice = existing.quantity * existing.price;
     } else {
       userCart.items.push({
@@ -499,16 +505,10 @@ exports.addAddress = catchAsyncError(async (req, res) => {
       message: "Pincode is required inside location",
     });
   }
-  const zone = await Zone.findOne({
-    "locations.pin": userPincode,
-    status: "Active",
-  });
-  if (!zone) {
-    return responseHandler({
-      res,
-      code: statusCode.DATAMISSING,
-      message: `We do not service the pincode ${userPincode}. Please try different pincode within Agra.`,
-    });
+  const addressDelivery = await getDeliveryQuote({ location }, 0);
+  if (!addressDelivery.serviceable) {
+    return responseHandler({ res, code: statusCode.DATAMISSING,
+      message: addressDelivery.message, data: { errorType: addressDelivery.errorType } });
   }
   const user = await User.findById(userId);
   if (!user) {
@@ -544,6 +544,7 @@ exports.addAddress = catchAsyncError(async (req, res) => {
     addressType: addressType || "Home",
   };
   user.addresses.push(newAddress);
+  const savedAddress = user.addresses[user.addresses.length - 1];
   await user.save();
   await syncUserToPetpooja(user);
 
@@ -551,7 +552,13 @@ exports.addAddress = catchAsyncError(async (req, res) => {
     res,
     code: statusCode.SUCCESS,
     message: "Address added successfully",
-    data: { user },
+    data: { user, addressId: savedAddress._id, address: savedAddress, deliveryLocation: {
+      addressId: savedAddress._id,
+      pincode: addressDelivery.pincode, zoneId: addressDelivery.zoneId,
+      warehouseId: addressDelivery.warehouseId, distanceKm: addressDelivery.distanceKm,
+      distanceMethod: addressDelivery.distanceMethod,
+      selectedDistanceRange: addressDelivery.selectedDistanceRange,
+    } },
   });
 });
 exports.editAddress = catchAsyncError(async (req, res) => {
@@ -589,6 +596,14 @@ exports.editAddress = catchAsyncError(async (req, res) => {
       code: statusCode.RESULTNOTFOUND,
       message: "Address not found",
     });
+  }
+
+  if (location !== undefined) {
+    const addressDelivery = await getDeliveryQuote({ location }, 0);
+    if (!addressDelivery.serviceable) {
+      return responseHandler({ res, code: statusCode.DATAMISSING,
+        message: addressDelivery.message, data: { errorType: addressDelivery.errorType } });
+    }
   }
 
   if (isDefault) {
@@ -869,7 +884,7 @@ exports.getSubcategoriesByCategory = catchAsyncError(async (req, res) => {
     });
   }
 
-  const category = await Category.findById(categoryId).select(
+  const category = await Category.findOne({ _id: categoryId, status: "Active" }).select(
     "subCategories categoryName",
   );
 
@@ -954,6 +969,14 @@ exports.getProductsByCategoryAndSubcategory = catchAsyncError(
         message: "Category not found",
       });
     }
+    if (category.status !== "Active") {
+      return responseHandler({
+        res,
+        code: statusCode.RESULTNOTFOUND,
+        message: "Category is inactive",
+        data: { categoryId, categoryName: category.categoryName, products: [], totalProducts: 0 },
+      });
+    }
 
     // If subcategoryId is provided, validate it exists in this category
     let subcategoryName = null;
@@ -967,6 +990,13 @@ exports.getProductsByCategoryAndSubcategory = catchAsyncError(
           res,
           code: statusCode.RESULTNOTFOUND,
           message: "Subcategory not found in this category",
+        });
+      }
+      if (subcategory.status !== "Active") {
+        return responseHandler({
+          res,
+          code: statusCode.RESULTNOTFOUND,
+          message: "Subcategory is inactive",
         });
       }
       subcategoryName = subcategory.subCategoryName;
@@ -1031,6 +1061,7 @@ exports.getCategoriesWithSubcategoriesAndProducts = catchAsyncError(
 
     // 🔹 Run aggregation directly (no separate pipeline variable)
     const data = await Category.aggregate([
+      { $match: { status: "Active" } },
       ...(categoryFilter ? [{ $match: { _id: { $in: categoryFilter } } }] : []),
 
       { $unwind: { path: "$subCategories", preserveNullAndEmptyArrays: true } },
@@ -1263,6 +1294,7 @@ exports.addToCart = catchAsyncError(async (req, res) => {
   );
   if (existingItem) {
     existingItem.quantity = qty;
+    existingItem.price = basePrice;
     existingItem.totalPrice = existingItem.price * existingItem.quantity;
   } else {
     cart.items.push({
@@ -1416,7 +1448,7 @@ exports.getCart = catchAsyncError(async (req, res) => {
     cart.items.map(async (item) => {
       const product = await Product.findById(item.productId)
         .lean()
-        .select("productName gst categoryId subcategoryId productVariations");
+        .select("productName gst categoryId subcategoryId productVariations isDeleted");
 
       // ❌ PRODUCT DELETED / NOT FOUND
       if (!product || product.isDeleted) return null;
@@ -1431,8 +1463,10 @@ exports.getCart = catchAsyncError(async (req, res) => {
       if (!selectedVariation) return null;
 
       const quantity = Number(item.quantity) || 0;
-      const price = Number(item.price);
+      const price = getVariationPrice(selectedVariation);
       const lineTotal = price * quantity;
+      item.price = price;
+      item.totalPrice = lineTotal;
 
       return {
         _id: item._id,
@@ -1461,6 +1495,8 @@ exports.getCart = catchAsyncError(async (req, res) => {
       };
     })
   );
+
+  if (cart.isModified("items")) await cart.save();
 
   const items = populatedItems.filter(Boolean);
   const totalItemsCount = items.reduce((acc, item) => acc + item.quantity, 0);
@@ -1555,155 +1591,25 @@ exports.getCart = catchAsyncError(async (req, res) => {
   }
 
   // -----------------------------
-  // 🟢 STEP 4: Get Zone + Delivery Config
-  // -----------------------------
+  // Distance pricing uses the selected address and the current default warehouse.
   const user = await User.findById(userId).lean();
-  let userPincode = null;
-  if (user && user.addresses?.length > 0) {
-    const selectedAddress =
-      user.addresses.find((a) => a.isSelected) ||
-      user.addresses.find((a) => a.isDefault);
-    userPincode = selectedAddress?.location?.pincode;
-  }
-  // console.log("🟩 USER PINCODE USED FOR ZONE CHECK:", userPincode);
+  const selectedAddress = req.query.addressId
+    ? user?.addresses?.find((a) => String(a._id) === String(req.query.addressId))
+    : user?.addresses?.find((a) => a.isSelected) || user?.addresses?.find((a) => a.isDefault);
+  const deliveryPricing = await getDeliveryQuote(selectedAddress, cartTotal);
+  let deliveryCharge = items.length ? deliveryPricing.deliveryCharge : 0;
+  let deliveryChargeInfo = items.length
+    ? deliveryPricing.deliveryChargeInfo || { deliveryCharge: 0, message: deliveryPricing.message }
+    : null;
+  const minOrderInfo = deliveryPricing.minOrderInfo || { message: deliveryPricing.message };
 
-  let zone = null;
-  if (userPincode) {
-    zone = await Zone.findOne({
-      "locations.pin": userPincode,
-      status: "Active",
-    }).lean();
-  }
-
-  let deliveryConfig = null;
-  if (zone) {
-    deliveryConfig = await DeliveryOrderConfig.findOne({
-      zoneId: zone._id,
-      deliveryChargesEnabled: true,
-    }).lean();
-  }
-  // console.log("zone:", zone);
-
-  // 🧾 Delivery Charge Logic
-  let deliveryChargeInfo = null;
-  let deliveryCharge = 0;
-
-  if (items.length > 0) {
-    if (zone && deliveryConfig && deliveryConfig.deliveryChargesEnabled) {
-      const range = deliveryConfig.deliveryRanges.find((r) => {
-        const minMatch = cartTotal >= r.minAmount;
-        const maxMatch = r.maxAmount ? cartTotal <= r.maxAmount : true;
-        return minMatch && maxMatch;
-      });
-
-      if (range) {
-        deliveryCharge = range.deliveryCharge;
-        // const maxAmountText = range.maxAmount ? `₹${range.maxAmount}` : "above";
-        deliveryChargeInfo = {
-          message: `Delivery charge ₹${range.deliveryCharge} applied for your order`,
-          deliveryCharge: range.deliveryCharge,
-        };
-      } else {
-        deliveryChargeInfo = {
-          message:
-            "No applicable delivery charge range found for your order value.",
-          deliveryCharge: 0,
-        };
-      }
-    } else {
-      if (!zone) {
-        deliveryChargeInfo = {
-          message:
-            "Delivery zone not found for your address pincode. Please add a valid address.",
-          deliveryCharge: 0,
-        };
-      } else if (!deliveryConfig) {
-        deliveryChargeInfo = {
-          message: "",
-          deliveryCharge: 0,
-        };
-      } else if (!deliveryConfig.deliveryChargesEnabled) {
-        deliveryChargeInfo = {
-          message: "Delivery charges are not enabled for your zone.",
-          deliveryCharge: 0,
-        };
-      } else {
-        deliveryChargeInfo = {
-          message: "No delivery charge ranges configured for your zone.",
-          deliveryCharge: 0,
-        };
-      }
-    }
-  }
-
-  // 🚚 Handle Free Delivery Coupon override
-  if (appliedCouponInfo && appliedCouponInfo.discountType === "FreeDelivery") {
+  // Preserve the existing free-delivery coupon override; minimum order still applies.
+  if (deliveryPricing.serviceable && items.length && appliedCouponInfo?.discountType === "FreeDelivery") {
     deliveryCharge = 0;
-    if (deliveryChargeInfo) {
-      deliveryChargeInfo.deliveryCharge = 0;
-      deliveryChargeInfo.message = "Free delivery applied via coupon!";
-    } else {
-      deliveryChargeInfo = {
-        message: "Free delivery applied via coupon!",
-        deliveryCharge: 0,
-      };
-    }
-  }
-  // When cart is empty, deliveryChargeInfo remains null
-
-  // -----------------------------
-  // Minimum Order Value Check
-  // -----------------------------
-  let minOrderInfo = null;
-
-  if (
-    deliveryConfig &&
-    deliveryConfig.minOrderEnabled &&
-    deliveryConfig.minOrderValue
-  ) {
-    const minOrderValue = parseFloat(deliveryConfig.minOrderValue);
-    // console.log("totalWithoutGST log:", totalWithoutGST);
-    // console.log("minOrderValue log:", minOrderValue);
-    if (cartTotal < minOrderValue) {
-      //worked
-      const amountToAdd = minOrderValue - cartTotal;
-      // console.log("amountToAdd log:", amountToAdd);
-      minOrderInfo = {
-        message: `Add ₹${amountToAdd.toFixed(
-          2,
-        )} more to reach the minimum order value of ₹${minOrderValue.toFixed(
-          2,
-        )}.`,
-        minOrderValue,
-        amountToAdd: parseFloat(amountToAdd.toFixed(2)),
-        zoneName: zone?.zoneName,
-      };
-    } else {
-      minOrderInfo = {
-        message: `Minimum order value of ₹${deliveryConfig.minOrderValue} achieved!`,
-        minOrderValue: deliveryConfig.minOrderValue,
-        zoneName: zone?.zoneName,
-      };
-    }
-  } else {
-    if (!zone) {
-      minOrderInfo = {
-        message:
-          "Delivery zone not found for your address pincode. Please add a valid address.",
-      };
-    } else if (!deliveryConfig) {
-      minOrderInfo = {
-        message: "No delivery configuration found for your zone.",
-      };
-    } else if (!deliveryConfig.minOrderEnabled) {
-      minOrderInfo = {
-        message: "No minimum order limit. You can place order with any amount.",
-      };
-    } else {
-      minOrderInfo = {
-        message: "No minimum order limit. You can place order with any amount.",
-      };
-    }
+    deliveryChargeInfo = { ...deliveryChargeInfo, deliveryCharge: 0, message: "Free delivery applied via coupon!" };
+    deliveryPricing.deliveryCharge = 0;
+    deliveryPricing.deliveryChargeInfo = deliveryChargeInfo;
+    deliveryPricing.freeDeliveryCouponApplied = true;
   }
 
   // -----------------------------
@@ -1794,18 +1700,14 @@ exports.getCart = catchAsyncError(async (req, res) => {
   // -----------------------------
   // 🧮 STEP 7: Final total calculation
   // -----------------------------
-  const platformFee = deliveryConfig?.platformFee || 0;
+  const platformFee = deliveryPricing.platformFee;
   const totalAmount = Math.max(
     cartTotal + deliveryCharge + platformFee - couponDiscount,
     0,
   );
 
   // Check if user can place order (minimum order validation)
-  const canPlaceOrder =
-    !minOrderInfo ||
-    (minOrderInfo && !minOrderInfo.amountToAdd) ||
-    (deliveryConfig &&
-      (!deliveryConfig.minOrderEnabled || !deliveryConfig.minOrderValue));
+  const canPlaceOrder = items.length > 0 && deliveryPricing.canPlaceOrder;
 
   console.log("🟡 MIN ORDER INFO:", JSON.stringify(minOrderInfo, null, 2));
 
@@ -1821,7 +1723,13 @@ exports.getCart = catchAsyncError(async (req, res) => {
       cartValue: parseFloat(cartTotal.toFixed(2)),
       // totalGSTAmount: parseFloat(totalGSTAmount.toFixed(2)),
       // totalGSTPercent: parseFloat(totalGSTPercent.toFixed(2)),
-      deliveryRanges: deliveryConfig?.deliveryRanges || [],
+      deliveryRanges: deliveryPricing.distanceRanges || [],
+      distanceRanges: deliveryPricing.distanceRanges || [],
+      deliveryPricing,
+      deliveryCharge,
+      freeDeliveryMessage: deliveryPricing.freeDeliveryMessage || "",
+      freeDeliveryAbove: deliveryPricing.freeDeliveryAbove ?? null,
+      serviceable: deliveryPricing.serviceable,
       deliveryChargeInfo,
       appliedCoupon: appliedCouponInfo,
       couponDiscount: parseFloat(couponDiscount.toFixed(2)),
@@ -1885,26 +1793,6 @@ exports.placeorder = catchAsyncError(async (req, res) => {
     });
     await user.save();
   }
-  const addressPincode = address?.location?.pincode;
-  if (!addressPincode) {
-    return responseHandler({
-      res,
-      code: statusCode.DATAMISSING,
-      message: "Address pincode is missing.",
-    });
-  }
-  const activeZone = await Zone.findOne({
-    "locations.pin": addressPincode,
-    status: "Active",
-  });
-  if (!activeZone) {
-    return responseHandler({
-      res,
-      code: statusCode.DATAMISSING,
-      message: `We currently do not service the pincode ${addressPincode}. Please select another address.`,
-    });
-  }
-
   // Build order items from cart and persist GST breakdown per item.
   const cartProductIds = [
     ...new Set(
@@ -1914,8 +1802,23 @@ exports.placeorder = catchAsyncError(async (req, res) => {
   const productsForOrder = await Product.find({
     _id: { $in: cartProductIds },
   })
-    .select("gst productVariations")
+    .select("gst productVariations isDeleted")
     .lean();
+  try {
+    const priceChanges = refreshCartPrices(cart.items, productsForOrder);
+    if (cart.isModified("items")) await cart.save();
+    const priceReview = checkoutPriceReview(cart.items, priceChanges, cartData);
+    if (priceReview) {
+      return responseHandler({
+        res, code: statusCode.DATAMISSING,
+        message: "Product prices have changed. Please refresh your cart and review the updated total before placing your order.",
+        data: priceReview,
+      });
+    }
+  } catch (err) {
+    return responseHandler({ res, code: statusCode.DATAMISSING, message: err.message });
+  }
+
   const productGSTMap = new Map(
     productsForOrder.map((product) => [product._id.toString(), Number(product.gst) || 0]),
   );
@@ -2103,8 +2006,15 @@ exports.placeorder = catchAsyncError(async (req, res) => {
     }
   }
 
-  const deliveryCharge = Number(cartData.deliveryCharge) || 0;
-  const platformFee = Number(cartData.platformFee) || 0;
+  let deliveryPricing;
+  try {
+    deliveryPricing = await requireDeliveryQuote(address, subTotalForOrder, { coupon: cart.appliedCoupon, userId });
+  } catch (error) {
+    return responseHandler({ res, code: statusCode.DATAMISSING, message: error.message,
+      data: { errorType: error.errorType } });
+  }
+  const deliveryCharge = deliveryPricing.deliveryCharge;
+  const platformFee = deliveryPricing.platformFee;
   const grandTotal = Number(
     Math.max(subTotalForOrder + deliveryCharge + platformFee - couponDiscount, 0).toFixed(2),
   );
@@ -2129,6 +2039,7 @@ exports.placeorder = catchAsyncError(async (req, res) => {
     couponDiscount,
     deliveryCharge,
     platformFee,
+    deliveryPricing,
     freeItem: freeItemData,
     totalItems: orderItems.reduce((sum, i) => sum + i.quantity, 0),
     subTotal: subTotalForOrder,
@@ -2578,9 +2489,19 @@ exports.getUserOrders = catchAsyncError(async (req, res) => {
             : returnedItem;
           const returnedProductId = returnedItemObj?.productId?.toString?.();
           const returnedQty = Number(returnedItemObj?.quantity || 0);
-          const returnedRawUnitPriceWithGST = Number(returnedItemObj?.priceWithGST || 0);
+          const returnedRawUnitPriceWithGST = Number(
+            returnedItemObj?.priceWithGST || returnedItemObj?.unitPrice || 0,
+          );
           const returnedBasePrice = Number(returnedItemObj?.basePrice || 0);
-          const returnedGstPercent = Number(returnedItemObj?.gstPercent || 0);
+          const originalItem = order.items?.find(
+            (i) =>
+              i.productId?.toString?.() === returnedProductId &&
+              i.variationId?.toString?.() === returnedItemObj?.variationId?.toString?.(),
+          );
+          let returnedGstPercent = Number(returnedItemObj?.gstPercent || 0);
+          if (returnedGstPercent <= 0 && originalItem) {
+            returnedGstPercent = Number(originalItem.gstPercent || 0);
+          }
           const returnedSubtotal = Number(returnedItemObj?.subtotal || 0);
           const returnedComputedUnitPriceWithGST = Number(
             (returnedBasePrice + (returnedBasePrice * returnedGstPercent) / 100).toFixed(2),
@@ -2604,7 +2525,9 @@ exports.getUserOrders = catchAsyncError(async (req, res) => {
 
           return {
             ...returnedItemObj,
+            priceWithGST: returnedUnitPrice,
             unitPrice: returnedUnitPrice,
+            sellingPrice: returnedUnitPrice,
             subtotal: Number((returnedUnitPrice * returnedQty).toFixed(2)),
             hsnCode: returnedProductId
               ? productHsnCodeMap.get(returnedProductId) || ""
@@ -2757,39 +2680,44 @@ exports.getOrderDetails = catchAsyncError(async (req, res) => {
 
   let deliveryRanges = [];
 
-  const user = await User.findById(userId).lean();
-  let userPincode = null;
+  if (order.deliveryPricing) {
+    deliveryRanges = order.deliveryPricing.distanceRanges || [];
+  } else {
+    const user = await User.findById(userId).lean();
+    let userPincode = null;
 
-  // Prefer order's saved delivery address (selected at checkout time),
-  // then fallback to currently selected user address.
-  const orderPincode =
-    order?.deliveryAddress?.pincode || order?.deliveryAddress?.location?.pincode;
+    // Prefer order's saved delivery address (selected at checkout time),
+    // then fallback to currently selected user address.
+    const orderPincode =
+      order?.deliveryAddress?.pincode || order?.deliveryAddress?.location?.pincode;
 
-  if (orderPincode) {
-    userPincode = orderPincode;
-  } else if (user && user.addresses?.length > 0) {
-    const selectedAddress = user.addresses.find((a) => a.isSelected);
-    userPincode = selectedAddress?.location?.pincode || selectedAddress?.pincode;
-  }
+    if (orderPincode) {
+      userPincode = orderPincode;
+    } else if (user && user.addresses?.length > 0) {
+      const selectedAddress = user.addresses.find((a) => a.isSelected);
+      userPincode = selectedAddress?.location?.pincode || selectedAddress?.pincode;
+    }
 
-  let zone = null;
-  if (userPincode) {
-    zone = await Zone.findOne({
-      "locations.pin": userPincode,
-      status: "Active",
-    }).lean();
-  }
+    let zone = null;
+    if (userPincode) {
+      zone = await Zone.findOne({
+        "locations.pin": userPincode,
+        status: "Active",
+      }).lean();
+    }
 
-  let deliveryConfig = null;
-  if (zone) {
-    deliveryConfig = await DeliveryOrderConfig.findOne({
-      zoneId: zone._id,
-      deliveryChargesEnabled: true,
-    }).lean();
-  }
+    let deliveryConfig = null;
+    if (zone) {
+      deliveryConfig = await DeliveryOrderConfig.findOne({
+        zoneId: zone._id,
+        deliveryChargesEnabled: true,
+      }).lean();
+    }
 
-  if (deliveryConfig?.deliveryRanges?.length > 0) {
-    deliveryRanges = deliveryConfig.deliveryRanges;
+    if (deliveryConfig?.deliveryRanges?.length > 0) {
+      deliveryRanges = deliveryConfig.deliveryRanges;
+    }
+
   }
 
   // 🧩 Step 3: Get delivery slot information if order is confirmed
@@ -2963,11 +2891,13 @@ exports.getBannerProducts = catchAsyncError(async (req, res) => {
     products = await Product.find({
       _id: { $in: productIds },
       isDeleted: { $ne: true },
+      categoryId: { $in: await Category.find({ status: "Active" }).distinct("_id") },
       "productVariations.isDeleted": { $ne: true },
     }).select("productName productVariations");
   } else {
     products = await Product.find({
       isDeleted: { $ne: true },
+      categoryId: { $in: await Category.find({ status: "Active" }).distinct("_id") },
       "productVariations.bannerId": bannerId,
       "productVariations.bannerStatusPerSku": "Active",
       "productVariations.isDeleted": { $ne: true },
@@ -3239,6 +3169,8 @@ exports.searchProducts = catchAsyncError(async (req, res) => {
     productVariations: { $exists: true, $ne: [] }
   };
 
+  match.categoryId = { $in: await Category.find({ status: "Active" }).distinct("_id") };
+
   if (query && query.trim() !== "") {
     const regex = new RegExp(query.trim(), "i");
     match.$or = [
@@ -3248,9 +3180,10 @@ exports.searchProducts = catchAsyncError(async (req, res) => {
   }
 
   if (categoryIds) {
-    match.categoryId = {
-      $in: categoryIds.split(",").map((id) => new mongoose.Types.ObjectId(id)),
-    };
+    const requestedCategoryIds = categoryIds.split(",").map((id) => new mongoose.Types.ObjectId(id));
+    match.categoryId.$in = match.categoryId.$in.filter((id) =>
+      requestedCategoryIds.some((requestedId) => requestedId.equals(id))
+    );
   }
 
   if (availability === "inStock") {
@@ -3573,6 +3506,8 @@ exports.guestGetCart = catchAsyncError(async (req, res) => {
     0,
   );
 
+  const deliveryPricing = await getDeliveryQuote({ location: req.body.location }, totalCartValue);
+
   // let totalWithoutGST = 0;
   // let totalGSTAmount = 0;
   // let totalCartValue = 0;
@@ -3600,7 +3535,17 @@ exports.guestGetCart = catchAsyncError(async (req, res) => {
       // cartValueWithoutGST: parseFloat(totalWithoutGST.toFixed(2)),
       // totalGSTAmount: parseFloat(totalGSTAmount.toFixed(2)),
       // totalGSTPercent: parseFloat(totalGSTPercent.toFixed(2)),
-      totalAmount: parseFloat(totalCartValue.toFixed(2)),
+      cartValue: parseFloat(totalCartValue.toFixed(2)),
+      deliveryPricing,
+      serviceable: deliveryPricing.serviceable,
+      distanceRanges: deliveryPricing.distanceRanges,
+      deliveryCharge: deliveryPricing.deliveryCharge,
+      deliveryChargeInfo: deliveryPricing.deliveryChargeInfo || { deliveryCharge: 0, message: deliveryPricing.message },
+      minOrderInfo: deliveryPricing.minOrderInfo || { message: deliveryPricing.message },
+      platformFee: deliveryPricing.platformFee,
+      freeDeliveryMessage: deliveryPricing.freeDeliveryMessage || "",
+      freeDeliveryAbove: deliveryPricing.freeDeliveryAbove ?? null,
+      totalAmount: Number((totalCartValue + deliveryPricing.deliveryCharge + deliveryPricing.platformFee).toFixed(2)),
       canPlaceOrder: false,
     },
   });

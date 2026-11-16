@@ -140,7 +140,8 @@ const notificationWorker = new Worker(
                             await sendNotification({
                                 deviceToken: deviceToken,
                                 title: title,
-                                body: message
+                                body: message,
+                                type
                             });
                             return { success: true, userId: user._id, deviceType: device.deviceType };
                         } catch (error) {
@@ -236,4 +237,3 @@ process.on('SIGTERM', async () => {
 });
 
 module.exports = notificationWorker;
-

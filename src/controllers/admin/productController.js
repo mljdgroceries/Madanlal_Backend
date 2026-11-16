@@ -834,27 +834,36 @@ exports.updateProductAndVariations = catchAsyncError(async (req, res) => {
 
       // Existing variation updates are local-only. Petpooja remains unchanged.
 
+      const variationUpdates = {
+        "productVariations.$.productType": u.productType,
+        "productVariations.$.measurmentUnit": u.measurmentUnit,
+        "productVariations.$.measurmentValue": u.measurmentValue,
+        "productVariations.$.stockStatus": stockStatus,
+        "productVariations.$.stockQuantity": u.stockQuantity,
+        "productVariations.$.minStock": u.minStock,
+        "productVariations.$.mrp": u.mrp,
+        "productVariations.$.sellingPrice": u.sellingPrice,
+        "productVariations.$.discountPercent": u.discountPercent,
+        "productVariations.$.productImages": u.productImages,
+        "productVariations.$.description": u.description,
+        "productVariations.$.petpoojaItemId":
+          u.petpoojaItemId || (oldVariation ? oldVariation.petpoojaItemId : null),
+        "productVariations.$.isDeleted": false,
+        "productVariations.$.deletedAt": null,
+      };
+
+      if (Object.prototype.hasOwnProperty.call(u, "bannerId")) {
+        variationUpdates["productVariations.$.bannerId"] = u.bannerId || null;
+        variationUpdates["productVariations.$.bannerStatusPerSku"] = u.bannerId
+          ? "Active"
+          : "Inactive";
+      } else if (Object.prototype.hasOwnProperty.call(u, "bannerStatusPerSku")) {
+        variationUpdates["productVariations.$.bannerStatusPerSku"] =
+          u.bannerStatusPerSku === "Active" ? "Active" : "Inactive";
+      }
+
       const updateDoc = {
-        $set: {
-          "productVariations.$.productType": u.productType,
-          "productVariations.$.measurmentUnit": u.measurmentUnit,
-          "productVariations.$.measurmentValue": u.measurmentValue,
-          "productVariations.$.stockStatus": stockStatus,
-          "productVariations.$.stockQuantity": u.stockQuantity,
-          "productVariations.$.minStock": u.minStock,
-          "productVariations.$.mrp": u.mrp,
-          "productVariations.$.sellingPrice": u.sellingPrice,
-          "productVariations.$.discountPercent": u.discountPercent,
-          "productVariations.$.productImages": u.productImages,
-          "productVariations.$.description": u.description,
-          "productVariations.$.bannerId": u.bannerId || null,
-          "productVariations.$.bannerStatusPerSku":
-            u.bannerStatusPerSku === "Active" ? "Active" : "Inactive",
-          "productVariations.$.petpoojaItemId":
-            u.petpoojaItemId || (oldVariation ? oldVariation.petpoojaItemId : null),
-          "productVariations.$.isDeleted": false,
-          "productVariations.$.deletedAt": null,
-        },
+        $set: variationUpdates,
       };
 
       if (shouldIncOutOfStockCount) {

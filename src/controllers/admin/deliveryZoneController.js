@@ -81,7 +81,7 @@ exports.createZone = catchAsyncError(async (req, res) => {
   });
 });
 exports.getAllZones = catchAsyncError(async (req, res) => {
-  const zones = await Zone.find({ status: "Active" }).lean();
+  const zones = await Zone.find().lean();
 
   const zonesWithDrivers = await Promise.all(
     zones.map(async (zone) => {

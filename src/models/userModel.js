@@ -16,9 +16,9 @@ const AddressSchema = new Schema({
             default: undefined,
             validate: {
                 validator: function (coords) {
-                    return coords === undefined || (Array.isArray(coords) && coords.length === 2);
+                    return coords === undefined || require('../helpers/distanceDeliveryHelper').validCoordinates(coords);
                 },
-                message: "Coordinates must be empty or contain exactly two values: [longitude, latitude]",
+                message: "Coordinates must contain valid [longitude, latitude] values",
             },
         },
         address: String,

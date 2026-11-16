@@ -12,7 +12,7 @@ if (!firebaseAdmin.apps.length) {
     }
 }
 
-const sendNotification = async ({ deviceToken, title, body }) => {
+const sendNotification = async ({ deviceToken, title, body, type }) => {
     if (!deviceToken || deviceToken.trim() === "") {
         throw new Error("Device token is required");
     }
@@ -23,6 +23,7 @@ const sendNotification = async ({ deviceToken, title, body }) => {
             title,
             body
         },
+        ...(type != null ? { data: { type: String(type) } } : {}),
         android: {
             priority: "high",
             notification: {

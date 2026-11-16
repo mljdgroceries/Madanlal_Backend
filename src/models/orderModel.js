@@ -61,6 +61,7 @@ const orderSchema = new mongoose.Schema(
     deliveryAddress: {
       fullName: String,
       houseFlatOfficeNo: String,
+      area_building: String,
       address: String,
       pincode: String,
       landmark: String,
@@ -112,6 +113,7 @@ const orderSchema = new mongoose.Schema(
     totalItems: Number, // total quantity of all items
     // totalGST: Number, // total gst amount of all items
     subTotal: Number, // total of all items before discounts
+    deliveryPricing: { type: mongoose.Schema.Types.Mixed },
     grandTotal: Number, // subTotal - couponDiscount + deliveryCharge
     paymentMethod: {
       type: String,

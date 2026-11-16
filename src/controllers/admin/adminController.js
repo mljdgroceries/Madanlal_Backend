@@ -141,7 +141,7 @@ exports.forgotPassword = catchAsyncError(async (req, res) => {
   );
 
   // ✅ Reset URL with token
-  const resetUrl = `https://mobulousdev.co.in/madanlal_admin/reset-password?token=${resetToken}`;
+  const resetUrl = `https://madanlalpansari.in/admin/reset-password?token=${resetToken}`;
 
   const transporter = nodemailer.createTransport({
     service: "gmail",

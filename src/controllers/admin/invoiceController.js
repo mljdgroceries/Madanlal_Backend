@@ -255,7 +255,7 @@ const renderInvoicePdf = ({ order, user, items, totals, warehouseAddress, wareho
     const companyEmail = warehouseEmail || process.env.INVOICE_COMPANY_EMAIL || "N/A";
     const buyerName = order.deliveryAddress?.fullName || user?.fullName || "N/A";
     const buyerPhone = order.deliveryAddress?.phoneNumber || user?.phone || "N/A";
-    const buyerAddress = order.deliveryAddress?.address || "N/A";
+    const buyerAddress = [order.deliveryAddress?.houseFlatOfficeNo, order.deliveryAddress?.area_building, order.deliveryAddress?.address, order.deliveryAddress?.landmark].filter(Boolean).join(", ") || "N/A";
     const buyerPincode = order.deliveryAddress?.pincode || "";
     const stateText = "UTTAR PRADESH (Code: 09)";
 
@@ -288,28 +288,31 @@ const renderInvoicePdf = ({ order, user, items, totals, warehouseAddress, wareho
     doc.text("SHIPPING ADDRESS", 390, labelsY);
     doc.font("Helvetica-Bold").fontSize(10).text("____", 35, valuesY);
     doc.text(stateText, 230, valuesY);
+    doc.font("Helvetica-Bold").fontSize(10).text(buyerName, 390, valuesY, { width: 170 });
+    const shippingAddrY = valuesY + doc.heightOfString(buyerName, { width: 170 }) + 6;
     doc.font("Helvetica").fontSize(9);
-    doc.text(companyAddress, 390, valuesY, { width: 170 });
-    const shippingAddrHeight = doc.heightOfString(companyAddress, { width: 170 });
+    doc.text(`${buyerAddress}${buyerPincode ? `, ${buyerPincode}` : ""}`, 390, shippingAddrY, { width: 170 });
+    const shippingAddrHeight = doc.heightOfString(`${buyerAddress}${buyerPincode ? `, ${buyerPincode}` : ""}`, { width: 170 });
+    const shippingPhoneY = shippingAddrY + shippingAddrHeight + 8;
+    doc.font("Helvetica-Bold").fontSize(9).text(`Phone No.: ${buyerPhone}`, 390, shippingPhoneY, { width: 170 });
+    const shippingBottomY = shippingPhoneY + doc.heightOfString(`Phone No.: ${buyerPhone}`, { width: 170 });
 
     // === SEPARATOR (adapts to shipping address height) ===
-    const sep2Y = Math.max(sep1Y + 57, valuesY + shippingAddrHeight + 14);
+    const sep2Y = Math.max(sep1Y + 57, shippingBottomY + 14);
     doc.moveTo(35, sep2Y).lineTo(560, sep2Y).strokeColor("#EDEDED").lineWidth(1).stroke();
 
     // === BUYER / COMPANY CONTACT SECTION (dynamic Y) ===
     const buyerLabelY = sep2Y + 16;
     const buyerNameY = buyerLabelY + 16;
-    const buyerAddrY = buyerNameY + 18;
+    const buyerAddrY = buyerNameY;
     const buyerFullAddr = `${buyerAddress}${buyerPincode ? `, ${buyerPincode}` : ""}`;
 
     doc.font("Helvetica").fontSize(8).text("BUYER (BILL TO)", 35, buyerLabelY);
-    doc.font("Helvetica-Bold").fontSize(10).text(buyerName, 35, buyerNameY);
     doc.font("Helvetica").fontSize(9).text(buyerFullAddr, 35, buyerAddrY, {
       width: 190,
     });
     const buyerAddrHeight = doc.heightOfString(buyerFullAddr, { width: 190 });
-    const buyerPhoneY = buyerAddrY + buyerAddrHeight + 8;
-    doc.font("Helvetica-Bold").fontSize(9).text(`Phone No.: ${buyerPhone}`, 35, buyerPhoneY);
+    const buyerBottomY = buyerAddrY + buyerAddrHeight;
 
     doc.font("Helvetica").fontSize(8).text("Company Contact", 360, buyerLabelY, {
       width: 190,
@@ -326,7 +329,7 @@ const renderInvoicePdf = ({ order, user, items, totals, warehouseAddress, wareho
     });
 
     // === ITEMS TABLE (starts after buyer section) ===
-    const tableStartY = Math.max(buyerPhoneY + 26, sep2Y + 118);
+    const tableStartY = Math.max(buyerBottomY + 26, sep2Y + 118);
     const tableEndY = renderItemsTable(doc, items, tableStartY);
     doc.moveTo(35, tableEndY).lineTo(560, tableEndY).strokeColor("#E3E3E3").stroke();
 

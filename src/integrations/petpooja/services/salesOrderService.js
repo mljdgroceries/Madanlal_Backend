@@ -57,6 +57,7 @@ class SalesOrderService extends BaseService {
   }
 
   async _buildSalesOrderPayload(order, user, targetStatus = 'sent') {
+    await require('./partyService').resolveOrderShippingAddress(user, order);
     const Product = require('../../../models/productModel');
     const itemService = require('./itemService');
 
@@ -219,6 +220,8 @@ class SalesOrderService extends BaseService {
       isAutoNumber: true,
       voucherAutoSeriesId: voucherSeries ? voucherSeries.id : null,
       partyId: Number(user.petpoojaCustomerId),
+      billingAddressId: Number(order.billingPetpoojaAddressId),
+      shippingAddressId: Number(order.shippingPetpoojaAddressId),
       placeOfSupplyId: 9, // Force intra-state UP (9)
       templateId: template ? template.id : null,
       date: new Date(order.createdAt).toISOString().split('T')[0],
@@ -245,6 +248,7 @@ class SalesOrderService extends BaseService {
    * This is used when creating a new sales order for returned items after a driver return.
    */
   async _buildDeliveredSalesOrderPayload(order, user, targetStatus = 'sent') {
+    await require('./partyService').resolveOrderShippingAddress(user, order);
     const Product = require('../../../models/productModel');
     const itemService = require('./itemService');
 
@@ -405,6 +409,8 @@ class SalesOrderService extends BaseService {
       isAutoNumber: true,
       voucherAutoSeriesId: voucherSeries ? voucherSeries.id : null,
       partyId: Number(user.petpoojaCustomerId),
+      billingAddressId: Number(order.billingPetpoojaAddressId),
+      shippingAddressId: Number(order.shippingPetpoojaAddressId),
       placeOfSupplyId: 9,
       templateId: template ? template.id : null,
       date: new Date(order.createdAt).toISOString().split('T')[0],

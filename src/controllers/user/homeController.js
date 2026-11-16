@@ -12,8 +12,42 @@ const { catchAsyncError } = require("../../utils/generateError");
 const statusCode = require("../../utils/httpResponseCode");
 const getPagination = require("../../utils/getPagination");
 const mongoose = require("mongoose");
+const { redisConnection } = require("../../config/redis");
+
+// Only data shared by every user is cached. User-specific "buy again" data is
+// still fetched live below, so the API response and its behaviour stay intact.
+const HOME_SHARED_CACHE_KEY = "home:shared:v2";
+const HOME_SHARED_CACHE_TTL_SECONDS = 60;
+
+const getHomeSharedCache = async () => {
+  if (redisConnection.status !== "ready") return null;
+
+  try {
+    const cachedData = await redisConnection.get(HOME_SHARED_CACHE_KEY);
+    return cachedData ? JSON.parse(cachedData) : null;
+  } catch (error) {
+    console.error("Home cache read failed:", error.message);
+    return null;
+  }
+};
+
+const setHomeSharedCache = async (data) => {
+  if (redisConnection.status !== "ready") return;
+
+  try {
+    await redisConnection.set(
+      HOME_SHARED_CACHE_KEY,
+      JSON.stringify(data),
+      "EX",
+      HOME_SHARED_CACHE_TTL_SECONDS
+    );
+  } catch (error) {
+    console.error("Home cache write failed:", error.message);
+  }
+};
 
 const getPopularPickProducts = async ({ skip = 0, limit = 10 } = {}) => {
+  const activeCategories = await Category.find({ status: "Active" }).distinct("_id");
   const pipeline = [
     { $match: { status: "Delivered" } },
     { $unwind: "$items" },
@@ -33,7 +67,7 @@ const getPopularPickProducts = async ({ skip = 0, limit = 10 } = {}) => {
       }
     },
     { $unwind: "$product" },
-    { $match: { "product.isDeleted": { $ne: true } } }, // ✅ ADD
+    { $match: { "product.isDeleted": { $ne: true }, "product.categoryId": { $in: activeCategories } } },
     {
       $addFields: {
         variation: {
@@ -92,6 +126,11 @@ exports.Home = catchAsyncError(async (req, res) => {
   const { skip, limitNum } = getPagination(page, limit);
   const now = new Date();
 
+  const cachedSharedData = await getHomeSharedCache();
+  let sharedHomeData = cachedSharedData;
+
+  if (!sharedHomeData) {
+  const activeCategoryIds = await Category.find({ status: "Active" }).distinct("_id");
   // --- Fetch banners & categories ---
   const allBanners = await Banner.find({
     status: "Active",
@@ -105,14 +144,20 @@ exports.Home = catchAsyncError(async (req, res) => {
 
   const bannersWithProducts = [];
   for (const banner of allBanners) {
-    const hasProducts = await Product.exists({
-      isDeleted: { $ne: true }, // ✅ ADD
+    const hasLinkedProducts = await Product.exists({
+      isDeleted: { $ne: true },
+      categoryId: { $in: activeCategoryIds },
       "productVariations.bannerId": banner._id,
       "productVariations.bannerStatusPerSku": "Active",
-      "productVariations.isDeleted": { $ne: true } // ✅ ADD
+      "productVariations.isDeleted": { $ne: true }
     });
 
-    if (hasProducts) {
+    const hasSelectedVariations = Array.isArray(banner.selectedVariations) && banner.selectedVariations.length > 0;
+
+    if (hasLinkedProducts || hasSelectedVariations) {
+      bannersWithProducts.push(banner);
+    } else {
+      // Include active promotional banners even if no products are explicitly mapped
       bannersWithProducts.push(banner);
     }
   }
@@ -153,6 +198,41 @@ exports.Home = catchAsyncError(async (req, res) => {
 
   const popularPicks = await getPopularPickProducts({ skip: 0, limit: 10 });
 
+  const allHeadings = await HomeHeading.find({ status: "Active" }).sort({ createdAt: -1 });
+  const headingsWithProducts = [];
+
+  for (const heading of allHeadings) {
+    if (heading.productIds && heading.productIds.length > 0) {
+      const productIds = heading.productIds.slice(0, 10);
+      const products = await Product.find({
+        _id: { $in: productIds },
+        isDeleted: { $ne: true },
+        categoryId: { $in: activeCategoryIds },
+        productVariations: { $exists: true, $not: { $size: 0 } },
+        "productVariations.isDeleted": { $ne: true }
+      });
+
+      if (products.length > 0) {
+        headingsWithProducts.push({
+          _id: heading._id,
+          heading: heading.heading,
+          products: filterProductsForUser(products),
+        });
+      }
+    }
+  }
+
+  sharedHomeData = {
+    banners: bannersWithProducts,
+    categories: categoriesWithProducts,
+    popularPicks,
+    headings: headingsWithProducts,
+  };
+
+  // Cache failure must never affect the home API response.
+  setHomeSharedCache(sharedHomeData);
+  }
+
   // --- buyAgain ---
   let buyAgain = [];
 
@@ -183,7 +263,8 @@ exports.Home = catchAsyncError(async (req, res) => {
     // ✅ FILTER DELETED PRODUCTS
     const products = await Product.find({
       _id: { $in: uniquePairs.map(p => p.productId) },
-      isDeleted: { $ne: true } // ✅ ADD
+      isDeleted: { $ne: true },
+      categoryId: { $in: await Category.find({ status: "Active" }).distinct("_id") }
     });
 
     buyAgain = products.map(product => {
@@ -206,6 +287,7 @@ exports.Home = catchAsyncError(async (req, res) => {
     }).filter(p => p !== null);
   }
 
+  /* Headings are included in sharedHomeData above and served from cache.
   // --- Headings ---
   const allHeadings = await HomeHeading.find({ status: "Active" }).sort({ createdAt: -1 });
   const headingsWithProducts = [];
@@ -231,16 +313,18 @@ exports.Home = catchAsyncError(async (req, res) => {
     }
   }
 
+  */
+
   return responseHandler({
     res,
     code: statusCode.SUCCESS,
     message: "Home data fetched successfully",
     data: {
-      banners: bannersWithProducts,
-      categories: categoriesWithProducts,
-      popularPicks,
+      banners: sharedHomeData.banners,
+      categories: sharedHomeData.categories,
+      popularPicks: sharedHomeData.popularPicks,
       buyAgain,
-      headings: headingsWithProducts,
+      headings: sharedHomeData.headings,
     },
   });
 });
@@ -286,13 +370,15 @@ exports.seeAllBuyAgain = catchAsyncError(async (req, res) => {
   // ✅ COUNT ONLY NON-DELETED PRODUCTS
   const totalProducts = await Product.countDocuments({
     _id: { $in: productIds },
-    isDeleted: { $ne: true } // ✅ ADD
+    isDeleted: { $ne: true },
+    categoryId: { $in: await Category.find({ status: "Active" }).distinct("_id") }
   });
 
   // ✅ FETCH ONLY NON-DELETED PRODUCTS
   const products = await Product.find({
     _id: { $in: productIds },
-    isDeleted: { $ne: true } // ✅ ADD
+    isDeleted: { $ne: true },
+    categoryId: { $in: await Category.find({ status: "Active" }).distinct("_id") }
   })
     .skip(skip)
     .limit(limitNum);
@@ -424,7 +510,8 @@ exports.viewParticularHeading = catchAsyncError(async (req, res) => {
   const result = await HomeHeading.aggregate([
     {
       $match: {
-        _id: new mongoose.Types.ObjectId(homeHeadingId)
+        _id: new mongoose.Types.ObjectId(homeHeadingId),
+        status: "Active"
       }
     },
     {

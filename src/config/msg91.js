@@ -10,9 +10,29 @@ const getOtpLength = () => Number(process.env.MSG91_OTP_LENGTH || 5);
 
 const withCountryCode = (phone) => {
   const countryCode = getCountryCode();
+  const invalidPhone = () => {
+    const error = new Error("Invalid mobile number");
+    error.statusCode = 400;
+    throw error;
+  };
+  if (!["string", "number"].includes(typeof phone) ||
+      !/^\+?[\d\s()-]+$/.test(String(phone).trim())) {
+    return invalidPhone();
+  }
   const digits = String(phone || "").replace(/\D/g, "");
 
-  if (!digits) return "";
+  if (!digits) return invalidPhone();
+
+  if (countryCode === "91") {
+    let national = digits;
+    if (national.length === 12 && national.startsWith("91")) {
+      national = national.slice(2);
+    } else if (national.length === 11 && national.startsWith("0")) {
+      national = national.slice(1);
+    }
+    if (!/^[6-9]\d{9}$/.test(national)) return invalidPhone();
+    return `91${national}`;
+  }
 
   // Avoid duplicating country code if user already passed it.
   if (digits.startsWith(countryCode) && digits.length > 10) {
@@ -90,6 +110,7 @@ const verifyOtp = async (phone, otp) => {
 const isConfigured = () => Boolean(getAuthKey() && getTemplateId());
 
 module.exports = {
+  withCountryCode,
   sendOtp,
   verifyOtp,
   isConfigured,

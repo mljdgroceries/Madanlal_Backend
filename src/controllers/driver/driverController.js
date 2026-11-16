@@ -237,6 +237,7 @@ const sendDriverOtpViaMsg91IfConfigured = async (phone, otp) => {
     await msg91.sendOtp(phone, otp);
   } catch (err) {
     console.error("Driver MSG91 OTP send failed:", err?.message || err);
+    throw err;
   }
 };
 
@@ -312,6 +313,9 @@ exports.sendOtp = catchAsyncError(async (req, res) => {
       message: "Mobile number is required",
     });
   }
+
+  // Validate without changing the stored number or existing lookup format.
+  msg91.withCountryCode(mobileNumber);
 
   // Check driver exists in DB
   const isDriverExists = await DRIVER.findOne({ mobileNumber });
@@ -1595,7 +1599,7 @@ exports.cancelOrderByDriver = catchAsyncError(async (req, res) => {
   }
 
   // ── Sync to Petpooja: Create Credit Note of full amount and mark Invoice closed ──
-  if (order.petpoojaVoucherId && order.invoiceId) {
+  if (!order.petpoojaCreditNoteId) {
     try {
       const customerUser = await User.findById(order.userId);
       if (customerUser) {
@@ -1608,11 +1612,50 @@ exports.cancelOrderByDriver = catchAsyncError(async (req, res) => {
         order.billingPetpoojaAddressId = partySync.billingAddressId;
         order.shippingPetpoojaAddressId = partySync.shippingAddressId;
 
+        if (!order.petpoojaVoucherId) {
+          const salesOrderResult = await salesOrderService.createSalesOrder(order, customerUser);
+          if (!salesOrderResult?.voucherId) {
+            throw new Error("Petpooja sales order could not be created before credit note");
+          }
+
+          order.petpoojaVoucherId = String(salesOrderResult.voucherId);
+          order.petpoojaVoucherNumber = salesOrderResult.voucherNumber
+            ? String(salesOrderResult.voucherNumber)
+            : null;
+          await order.save();
+        }
+
+        if (!order.invoiceId) {
+          const invoiceVoucherSeries = await invoiceService.initVoucher();
+          const invoiceTemplate = await invoiceService.initTemplate();
+          const invoiceCustomCharge = await salesOrderService.getCustomCharge();
+          const invoiceResult = await invoiceService.createInvoice(
+            order.petpoojaVoucherId,
+            order,
+            customerUser,
+            invoiceTemplate ? invoiceTemplate.id : null,
+            invoiceCustomCharge ? invoiceCustomCharge.id : null,
+            invoiceVoucherSeries ? invoiceVoucherSeries.id : null,
+            "sent"
+          );
+
+          if (!invoiceResult?.voucherId) {
+            throw new Error("Petpooja invoice could not be created before credit note");
+          }
+
+          order.invoiceId = String(invoiceResult.voucherId);
+          order.invoiceNumber = invoiceResult.voucherNumber
+            ? String(invoiceResult.voucherNumber)
+            : null;
+          await order.save();
+        }
+
         // Fetch credit note voucher series and template
         const voucherSeriesObj = await creditNoteService.initVoucher();
         const voucherAutoSeriesId = voucherSeriesObj ? voucherSeriesObj.id : null;
         const templateObj = await creditNoteService.initTemplate();
         const templateId = templateObj ? templateObj.id : null;
+        const customChargeObj = await salesOrderService.getCustomCharge();
 
         // Build original items for credit note
         const cnItems = itemsToRestock.map(item => {
@@ -1640,13 +1683,18 @@ exports.cancelOrderByDriver = catchAsyncError(async (req, res) => {
         
         const creditNoteResult = await creditNoteService.createCreditNote(
           activeInvoiceId, cnItems, order, customerUser, voucherAutoSeriesId, templateId,
-          { includeOrderAdjustments: true }
+          {
+            includeOrderAdjustments: true,
+            customChargeId: customChargeObj ? customChargeObj.id : null,
+          }
         );
         console.log('[PETPOOJA-DRIVER-CANCEL] Credit note result:', creditNoteResult);
         
-        if (creditNoteResult && creditNoteResult.creditNoteId) {
-          order.petpoojaCreditNoteId = creditNoteResult.creditNoteId;
+        if (!creditNoteResult?.creditNoteId) {
+          throw new Error("Petpooja credit note response did not include a credit note ID");
         }
+
+        order.petpoojaCreditNoteId = creditNoteResult.creditNoteId;
 
         // Mark invoice closed
         await invoiceService.markInvoiceClosed(activeInvoiceId);
@@ -1839,6 +1887,7 @@ exports.getOrderDetails = catchAsyncError(async (req, res) => {
       );
       const returnedGstPercent = resolveGstPercent(
         ret?.gstPercent,
+        originalItem?.gstPercent,
         originalItem?.productId?.gst,
         ret?.productId?.gst,
       );
@@ -1883,6 +1932,7 @@ exports.getOrderDetails = catchAsyncError(async (req, res) => {
         ),
         priceWithGST: returnedUnitPrice,
         unitPrice: returnedUnitPrice,
+        sellingPrice: returnedUnitPrice,
         subtotal: Number((returnedUnitPrice * returnedQty).toFixed(2)),
         measurmentUnit: variation?.measurmentUnit || null,
         measurmentValue: variation?.measurmentValue || null,
@@ -2005,8 +2055,18 @@ exports.returnSelectedItemsByDriver = catchAsyncError(async (req, res) => {
       const key = buildReturnKey(item.productId, item.variationId);
       const detailQty = Number(item.quantity) || 0;
       const detailBasePrice = Number(item.basePrice) || 0;
-      const detailGstPercent = resolveGstPercent(item.gstPercent);
-      const detailRawPriceWithGST = Number(item.priceWithGST ?? 0);
+      const originalItem = order.items?.find(
+        (i) =>
+          i.productId?._id?.toString?.() === item.productId?.toString?.() &&
+          i.variationId?.toString?.() === item.variationId?.toString?.(),
+      );
+      const detailGstPercent = resolveGstPercent(
+        item.gstPercent,
+        originalItem?.gstPercent,
+        originalItem?.productId?.gst,
+        item.productId?.gst,
+      );
+      const detailRawPriceWithGST = Number(item.priceWithGST || item.unitPrice || item.sellingPrice || 0);
       const detailComputedUnitPriceWithGST = Number(
         (detailBasePrice + (detailBasePrice * detailGstPercent) / 100).toFixed(2),
       );
@@ -2036,6 +2096,7 @@ exports.returnSelectedItemsByDriver = catchAsyncError(async (req, res) => {
         gstPercent: detailGstPercent,
         priceWithGST: detailUnitPriceWithGST,
         unitPrice: detailUnitPriceWithGST,
+        sellingPrice: detailUnitPriceWithGST,
         subtotal: Number((detailUnitPriceWithGST * detailQty).toFixed(2)),
         gstAmount: Number(
           ((detailUnitPriceWithGST - detailBasePrice) * detailQty).toFixed(2),
@@ -2176,6 +2237,7 @@ exports.returnSelectedItemsByDriver = catchAsyncError(async (req, res) => {
       gstPercent,
       priceWithGST: unitPriceWithGST,
       unitPrice: unitPriceWithGST,
+      sellingPrice: unitPriceWithGST,
       subtotal: Number((unitPriceWithGST * mergedReturnedQty).toFixed(2)),
       gstAmount: Number(
         ((unitPriceWithGST - base) * mergedReturnedQty).toFixed(2),

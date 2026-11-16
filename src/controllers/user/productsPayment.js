@@ -1,3 +1,5 @@
+const { requireDeliveryQuote } = require("../../services/distanceDeliveryService");
+const { refreshCartPrices, checkoutPriceReview } = require("../../helpers/cartPriceHelper");
 const crypto = require("crypto");
 const razorpay = require("../../config/razorPay");
 
@@ -7,7 +9,6 @@ const Product = require("../../models/productModel");
 const Cart = require("../../models/cartModel");
 const Coupons = require("../../models/promotionsAndCouponModal");
 const CouponUsage = require("../../models/couponUsageModel");
-const Zone = require("../../models/deliveryZonesModel");
 const Order = require("../../models/orderModel");
 const Notification = require("../../models/notificationModel");
 const FreeItemRule = require("../../models/freeItemRuleModel");
@@ -67,19 +68,6 @@ const buildPrepaidOrderDraft = async ({ userId, addressId, cartData }) => {
     const address = user.addresses.id(addressId);
     if (!address) throw new Error("Address not found.");
 
-    const addressPincode = address?.location?.pincode;
-    if (!addressPincode) throw new Error("Address pincode is missing.");
-
-    const activeZone = await Zone.findOne({
-        "locations.pin": addressPincode,
-        status: "Active",
-    });
-    if (!activeZone) {
-        throw new Error(
-            `We currently do not service the pincode ${addressPincode}. Please select another address.`,
-        );
-    }
-
     // Sync stock from Petpooja and validate cart quantities
     const stockResult = await validateCartStockWithPetpooja(cart.items);
     if (!stockResult.ok) {
@@ -99,8 +87,16 @@ const buildPrepaidOrderDraft = async ({ userId, addressId, cartData }) => {
     const productsForOrder = await Product.find({
         _id: { $in: cartProductIds },
     })
-        .select("gst productVariations")
+        .select("gst productVariations isDeleted")
         .lean();
+    const priceChanges = refreshCartPrices(cart.items, productsForOrder);
+    if (cart.isModified("items")) await cart.save();
+    const priceReview = checkoutPriceReview(cart.items, priceChanges, cartData);
+    if (priceReview) {
+        const err = new Error("Product prices have changed. Please refresh your cart and review the updated total before paying.");
+        err.priceReview = priceReview;
+        throw err;
+    }
     const productGSTMap = new Map(
         productsForOrder.map((product) => [
             product._id.toString(),
@@ -227,14 +223,33 @@ const buildPrepaidOrderDraft = async ({ userId, addressId, cartData }) => {
             }
         }
     }
-    const deliveryCharge = Number(cartData?.deliveryCharge) || 0;
-    const platformFee = Number(cartData?.platformFee) || 0;
+    const deliveryPricing = await requireDeliveryQuote(address, subTotal, { coupon: cart.appliedCoupon, userId });
+    const deliveryCharge = deliveryPricing.deliveryCharge;
+    const platformFee = deliveryPricing.platformFee;
     const grandTotal = Number(
         Math.max(subTotal + deliveryCharge + platformFee - couponDiscount, 0).toFixed(2),
     );
 
     if (grandTotal <= 0) {
         throw new Error("Invalid payable amount.");
+    }
+
+    // Review a changed checkout total before creating any payment order.
+    // Fees remain server-calculated; never substitute client-supplied charges.
+    if (cartData?.totalAmount !== undefined && cartData.totalAmount !== null &&
+        (!Number.isFinite(Number(cartData.totalAmount)) ||
+            Math.round(Number(cartData.totalAmount) * 100) !== Math.round(grandTotal * 100))) {
+        const err = new Error("Checkout total has changed. Please refresh your cart and review the updated delivery charge before paying.");
+        err.priceReview = {
+            errorType: "CHECKOUT_TOTAL_CHANGED",
+            cartValue: subTotal,
+            deliveryCharge,
+            platformFee,
+            couponDiscount,
+            totalAmount: grandTotal,
+            deliveryPricing,
+        };
+        throw err;
     }
 
     return {
@@ -262,6 +277,7 @@ const buildPrepaidOrderDraft = async ({ userId, addressId, cartData }) => {
             couponDiscount,
             deliveryCharge,
             platformFee,
+            deliveryPricing,
             freeItem: freeItemData,
             totalItems: orderItems.reduce((sum, i) => sum + i.quantity, 0),
             subTotal,
@@ -474,9 +490,17 @@ exports.createOrder = catchAsyncError(async (req, res) => {
                 amount: rzOrder.amount,
                 currency: rzOrder.currency,
                 key: process.env.RAZORPAY_KEY_ID,
+                cartValue: draft.orderDocPayload.subTotal,
+                deliveryCharge: draft.orderDocPayload.deliveryCharge,
+                platformFee: draft.orderDocPayload.platformFee,
+                couponDiscount: draft.orderDocPayload.couponDiscount,
+                totalAmount: draft.orderDocPayload.grandTotal,
             },
         });
     } catch (err) {
+        if (err.priceReview) {
+            return responseHandler({ res, code: statusCode.DATAMISSING, message: err.message, data: err.priceReview });
+        }
         if (err.stockIssues) {
             return responseHandler({
                 res,
@@ -486,7 +510,8 @@ exports.createOrder = catchAsyncError(async (req, res) => {
             });
         }
 
-        return responseHandler({ res, code: statusCode.DATAMISSING, message: err.message || "Unable to create payment order.", });
+        return responseHandler({ res, code: statusCode.DATAMISSING, message: err.message || "Unable to create payment order.",
+            data: err.errorType ? { errorType: err.errorType } : undefined });
     }
 });
 

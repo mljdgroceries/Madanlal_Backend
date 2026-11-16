@@ -31,6 +31,39 @@ const normalizeSelectedVariations = (selectedVariations = []) => {
     }));
 };
 
+const normalizeProductIds = (products = []) => {
+  if (!Array.isArray(products)) return [];
+
+  const seen = new Set();
+  return products
+    .map((product) => product?._id || product?.productId || product)
+    .filter((productId) => mongoose.Types.ObjectId.isValid(productId))
+    .filter((productId) => {
+      const key = productId.toString();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
+const getSelectedVariationsFromProducts = async (productIds = []) => {
+  if (!productIds.length) return [];
+
+  const products = await Product.find({
+    _id: { $in: productIds },
+    isDeleted: { $ne: true },
+  }).select("productVariations");
+
+  return products.flatMap((product) =>
+    product.productVariations
+      .filter((variation) => variation.isDeleted !== true)
+      .map((variation) => ({
+        productId: product._id,
+        variationId: variation._id,
+      }))
+  );
+};
+
 const validateSelectedVariations = async (selectedVariations = []) => {
   for (const sv of selectedVariations) {
     const product = await Product.findOne({ _id: sv.productId, isDeleted: { $ne: true } });
@@ -167,12 +200,21 @@ exports.createBanner = catchAsyncError(async (req, res) => {
     startDate,
     endDate,
     selectedVariations,
+    products,
   } = req.body;
 
-  const normalizedSelectedVariations = normalizeSelectedVariations(selectedVariations);
+  const normalizedProductIds = normalizeProductIds(products);
+  const hasProductSelections = normalizedProductIds.length > 0;
+  const normalizedSelectedVariations = Array.isArray(selectedVariations) && selectedVariations.length > 0
+    ? normalizeSelectedVariations(selectedVariations)
+    : await getSelectedVariationsFromProducts(normalizedProductIds);
 
   // Validate selectedVariations to ensure product and variation exist and are not deleted
-  if (Array.isArray(selectedVariations) && normalizedSelectedVariations.length !== selectedVariations.length) {
+  if (
+    Array.isArray(selectedVariations) &&
+    selectedVariations.length > 0 &&
+    normalizedSelectedVariations.length !== selectedVariations.length
+  ) {
     return responseHandler({
       res,
       code: statusCode.DATAMISSING,
@@ -197,6 +239,9 @@ exports.createBanner = catchAsyncError(async (req, res) => {
     status,
     startDate,
     endDate,
+    products: hasProductSelections
+      ? normalizedProductIds
+      : [...new Set(normalizedSelectedVariations.map((sv) => sv.productId.toString()))],
     selectedVariations: normalizedSelectedVariations,
   });
 
@@ -386,7 +431,7 @@ exports.deleteBanner = catchAsyncError(async (req, res) => {
 });
 exports.editBanner = catchAsyncError(async (req, res) => {
   const { bannerId } = req.params;
-  const updateData = req.body;
+  const updateData = { ...req.body };
 
   const existingBanner = await Banner.findById(bannerId);
   if (!existingBanner) {
@@ -397,10 +442,28 @@ exports.editBanner = catchAsyncError(async (req, res) => {
     });
   }
 
-  if (Object.prototype.hasOwnProperty.call(updateData, "selectedVariations")) {
-    const normalizedSelectedVariations = normalizeSelectedVariations(updateData.selectedVariations);
+  const hasSelectedVariations = Object.prototype.hasOwnProperty.call(
+    updateData,
+    "selectedVariations"
+  );
+  const hasProducts = Object.prototype.hasOwnProperty.call(updateData, "products");
+  const normalizedProductIds = normalizeProductIds(updateData.products);
+  const shouldUpdateFromProducts =
+    hasProducts && normalizedProductIds.length > 0 &&
+    (!Array.isArray(updateData.selectedVariations) || updateData.selectedVariations.length === 0);
+  const shouldUpdateSelectedVariations =
+    (hasSelectedVariations &&
+      Array.isArray(updateData.selectedVariations) &&
+      updateData.selectedVariations.length > 0) ||
+    shouldUpdateFromProducts;
+
+  if (shouldUpdateSelectedVariations) {
+    const normalizedSelectedVariations = shouldUpdateFromProducts
+      ? await getSelectedVariationsFromProducts(normalizedProductIds)
+      : normalizeSelectedVariations(updateData.selectedVariations);
 
     if (
+      !shouldUpdateFromProducts &&
       Array.isArray(updateData.selectedVariations) &&
       normalizedSelectedVariations.length !== updateData.selectedVariations.length
     ) {
@@ -421,6 +484,15 @@ exports.editBanner = catchAsyncError(async (req, res) => {
     }
 
     updateData.selectedVariations = normalizedSelectedVariations;
+    updateData.products = shouldUpdateFromProducts
+      ? normalizedProductIds
+      : [...new Set(normalizedSelectedVariations.map((sv) => sv.productId.toString()))];
+  } else if (hasSelectedVariations) {
+    delete updateData.selectedVariations;
+  }
+
+  if (hasProducts && !shouldUpdateSelectedVariations) {
+    delete updateData.products;
   }
 
   if (
@@ -461,7 +533,7 @@ exports.editBanner = catchAsyncError(async (req, res) => {
     { new: true, runValidators: true }
   );
 
-  if (Object.prototype.hasOwnProperty.call(updateData, "selectedVariations")) {
+  if (shouldUpdateSelectedVariations) {
     await syncBannerVariations(bannerId, updateData.selectedVariations);
   }
 
