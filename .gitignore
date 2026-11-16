@@ -1,6 +1,11 @@
 node_modules/
+
+# Environment files
 .env
 .env.local
 .env.production
 .env.staging
+
+# Firebase credentials
 src/config/madanlalpansari-7881d-firebase-adminsdk-fbsvc-0d21b1d3f3.json
+backup/
